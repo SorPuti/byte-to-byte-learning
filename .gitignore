@@ -1,0 +1,9 @@
+.openidea/
+.venv/
+.env
+.superpowers/
+*.webpm
+*.mp4
+
+
+
