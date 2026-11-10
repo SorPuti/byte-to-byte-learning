@@ -34,11 +34,16 @@ TIMEOUT_SECONDS = 12 * 60 * 60
 DATA_MOUNT = "/data"
 CHECKPOINT_MOUNT = "/checkpoints"
 
+# Dependências do treino no container. Listadas aqui (e não lidas de um arquivo)
+# para não depender do caminho do diretório de trabalho nem de requirements.txt.
+# Mantenha em sintonia com [project].dependencies do pyproject.toml.
+REMOTE_PACKAGES = ["numpy>=2.5.4", "tqdm>=4.70.1"]
+
 app = modal.App(APP_NAME)
 
 image = (
     modal.Image.debian_slim(python_version=PYTHON_VERSION)
-    .pip_install_from_requirements("requirements.txt")
+    .pip_install(*REMOTE_PACKAGES)
     .add_local_python_source("src", "config")
 )
 
@@ -61,6 +66,13 @@ def train_remote(settings: dict, options: dict) -> str | None:
         tokenizer_file=f"{DATA_MOUNT}/tokenizer.json",
         checkpoint_dir=CHECKPOINT_MOUNT,
     )
+    import os
+
+    if not os.path.exists(paths.corpus_file):
+        raise FileNotFoundError(
+            f"Corpus ausente no Volume '{DATA_VOLUME_NAME}'. Envie antes do treino com:\n"
+            f"  modal volume put {DATA_VOLUME_NAME} data/corpus_pt.txt /corpus_pt.txt"
+        )
     try:
         return train(
             TrainConfig(**settings),

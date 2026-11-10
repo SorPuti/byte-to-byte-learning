@@ -1,3 +1,5 @@
+import math
+
 import numpy as np
 
 _SQRT_2_OVER_PI = float(np.sqrt(2.0 / np.pi))
@@ -114,7 +116,14 @@ class Embedding:
         return self.W[idx]
 
     def backward(self, dout: np.ndarray, idx: np.ndarray) -> None:
-        np.add.at(self.dW, idx, dout)
+        # Equivalente a np.add.at(self.dW, idx, dout), mas vetorizado: np.add.at é lento.
+        flat_idx = idx.reshape(-1)
+        flat = dout.reshape(-1, self.dW.shape[1])
+        order = np.argsort(flat_idx, kind="stable")
+        sorted_idx = flat_idx[order]
+        uniq, starts = np.unique(sorted_idx, return_index=True)
+        sums = np.add.reduceat(flat[order], starts, axis=0)
+        self.dW[uniq] += sums.astype(self.dW.dtype, copy=False)
 
     def zero_grad(self) -> None:
         self.dW[:] = 0
@@ -153,7 +162,8 @@ class CausalSelfAttention:
         self._q = self._split(self.Wq.forward(x))
         self._k = self._split(self.Wk.forward(x))
         self._v = self._split(self.Wv.forward(x))
-        scores = self._q @ self._k.transpose(0, 1, 3, 2) / np.sqrt(self.head_dim)
+        # math.sqrt (float Python): np.sqrt devolve float64 e promove a atenção inteira para float64.
+        scores = self._q @ self._k.transpose(0, 1, 3, 2) / math.sqrt(self.head_dim)
         scores = np.where(self._mask[:t, :t], -1e9, scores)
         self._weights = _softmax(scores)
         out = self._weights @ self._v
@@ -165,7 +175,7 @@ class CausalSelfAttention:
         dw = do @ self._v.transpose(0, 1, 3, 2)
         dv = w.transpose(0, 1, 3, 2) @ do
         dscores = w * (dw - (dw * w).sum(axis=-1, keepdims=True))
-        dscores = dscores / np.sqrt(self.head_dim)
+        dscores = dscores / math.sqrt(self.head_dim)
         dq = dscores @ self._k
         dk = dscores.transpose(0, 1, 3, 2) @ self._q
         return (
@@ -273,7 +283,8 @@ class GPT:
         x, h, probs, targets = self._cache
         b, t, v = probs.shape
         dlogits = probs
-        np.subtract.at(dlogits, (np.arange(b)[:, None], np.arange(t)[None, :], targets), 1.0)
+        # Pares (b, t) são únicos, então indexação direta equivale a subtract.at e é mais rápida.
+        dlogits[np.arange(b)[:, None], np.arange(t)[None, :], targets] -= 1.0
         dlogits /= b * t
         d_head = dlogits.reshape(-1, v).T @ h.reshape(-1, h.shape[-1])
         self.token_emb.dW += d_head

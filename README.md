@@ -6,9 +6,8 @@ Feito só com Python e NumPy: o tokenizador, o backpropagation e o AdamW são es
 ## 1. Instalar
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+uv sync                          # cria o .venv e instala as dependências do pyproject.toml
+uv run python train.py --help    # ou: source .venv/bin/activate
 ```
 
 ## 2. Gerar o dataset em português
@@ -41,11 +40,13 @@ O texto gerado nesse teste ainda vai ser ruim, porque o modelo viu só 5 passos.
 
 ## 5. Treino
 
-Treino completo com a configuração do vídeo (75 épocas):
+Treino completo com a configuração do vídeo (75 épocas), na sua máquina:
 
 ```bash
 python train.py
 ```
+
+Para rodar na nuvem em vez da sua máquina, veja a seção 5b.
 
 Para um teste de verdade sem esperar dias, rode poucas épocas:
 
@@ -63,6 +64,72 @@ Se você rodar `python train.py` de novo, ele continua de onde parou.
 Observação: o cronograma de aprendizado (cosine) é calculado para 75 épocas.
 Com `--epochs 3` o aprendizado fica alto durante o teste, então o resultado não é o final.
 
+## 5b. Treino no Modal (opcional, na nuvem)
+
+O Modal não tem um processo de treino próprio. Ele executa **o mesmo loop** de `src/training.py`
+dentro de um container remoto. O ponto de entrada continua sendo o `train.py`:
+a flag `--backend` só decide **onde** o código roda.
+
+```
+python train.py                    → src/training.py   (seu computador)
+python train.py --backend modal    → modal_app.py::train_remote → src/training.py  (container Modal)
+modal run modal_app.py             → modal_app.py::main → train_remote → src/training.py  (mesmo caminho)
+```
+
+Os dados e checkpoints ficam em dois Volumes do Modal (discos persistentes na nuvem):
+
+| Volume | Conteúdo |
+|---|---|
+| `byte-to-byte-data` | `corpus_pt.txt` (enviado por você) e `tokenizer.json` (criado na primeira execução) |
+| `byte-to-byte-checkpoints` | `epoch_XX.npz`, um por época |
+
+### Passo a passo
+
+**Uma vez só:**
+
+```bash
+pip install modal
+modal setup                                                       # login na sua conta Modal
+python prepare_data.py                                            # gera data/corpus_pt.txt localmente, se ainda não existe
+modal volume put byte-to-byte-data data/corpus_pt.txt /corpus_pt.txt
+```
+
+**Rodar o treino** (escolha uma forma; as duas executam a mesma coisa):
+
+```bash
+python train.py --backend modal --epochs 3          # pela CLI do projeto (recomendado)
+modal run modal_app.py --epochs 3                   # direto pelo Modal
+```
+
+Teste rápido remoto antes do treino de verdade:
+
+```bash
+python train.py --backend modal --epochs 1 --smoke
+```
+
+**Retomar:** rode o mesmo comando de novo. O treino continua do último `epoch_XX.npz` do Volume de checkpoints.
+
+**Baixar um checkpoint** para gerar texto localmente:
+
+```bash
+modal volume get byte-to-byte-checkpoints epoch_02.npz ./checkpoints/
+python -m src.generate --checkpoint checkpoints/epoch_02.npz --tokens 100
+```
+
+### Pontos de atenção
+
+- **`--epochs` é obrigatório na prática.** O padrão é 75 épocas (`config.EPOCHS`), ou seja, horas de
+  cobrança se você esquecer a flag. Use sempre `--epochs`.
+- **Corpus precisa estar no Volume** antes da primeira execução. Se não estiver, o treino falha ao abrir o arquivo.
+- **Tokenizer:** se `tokenizer.json` não existe no Volume de dados, o tokenizador é treinado no container
+  (mais lento) e salvo lá para as próximas execuções.
+- **`--checkpoint-dir` não se aplica** ao backend `modal`; os checkpoints vão sempre para o Volume.
+- **Recursos e custo:** vCPUs, memória e timeout estão no topo de `modal_app.py`
+  (padrão: 8 vCPUs, 16 GB, 12 h). Confira o preço no painel do Modal antes de rodar.
+- **Python 3.14:** confirme que o Modal suporta essa versão. Se não, troque `PYTHON_VERSION` em `modal_app.py`.
+- **Ainda não testado contra o Modal real.** Os testes automatizados usam um `modal` falso.
+  A primeira execução com `--smoke` é a validação de verdade.
+
 ## 6. Gerar texto
 
 ```bash
@@ -78,7 +145,10 @@ python -m src.generate --checkpoint checkpoints/epoch_74.npz --prompt "— Mas, 
 ```
 prepare_data.py      baixa e monta o dataset em português
 config.py            todos os hiperparâmetros
-train.py             loop de treino (com retomada automática)
+train.py             CLI de treino (--backend local|modal) e retomada automática
+modal_app.py         entrypoint do treino no Modal (único arquivo que importa modal)
+src/training.py      loop de treino independente de ambiente
+src/backends/        backends de execução: local e Modal
 src/tokenizer.py     tokenizador BPE
 src/gpt.py           modelo GPT com backpropagation manual
 src/optimizer.py     AdamW e cosine learning rate

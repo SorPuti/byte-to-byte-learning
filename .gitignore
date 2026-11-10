@@ -4,7 +4,6 @@
 .superpowers/
 *.webm
 *.mp4
-docs/superpowers/
 
 data/
 checkpoints*/
