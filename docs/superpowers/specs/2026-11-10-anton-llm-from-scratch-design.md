@@ -3,7 +3,7 @@
 **Date:** 2026-11-10  
 **Inspired by:** "I Trained an LLM from Scratch" (YouTube, ID: vKdKtxpfvIc)  
 **Language:** Python 3.14 + NumPy 2.4 (no ML framework)  
-**Goal:** Functional GPT-style language model (~6M params) trained on Shakespeare, generates Shakespeare-style text.
+**Goal:** Functional GPT-style language model (~6M params) trained on Machado de Assis (literatura brasileira, domínio público), generates Portuguese prose in his style.
 
 ---
 
@@ -16,10 +16,10 @@ byte-to-byte-learning/
 │   └── tokenizer.json         # saved BPE vocab + merge rules
 ├── src/
 │   ├── __init__.py
-│   ├── tokenizer.py           # BPETokenizer: train / encode / decode / save / load
-│   ├── model.py               # Transformer: forward + manual backward
-│   ├── optimizer.py           # AdamW
-│   ├── dataset.py             # batch sampler
+│   ├── tokenizer.py           # Tokenizer: train / encode / decode / save / load
+│   ├── gpt.py                 # Transformer: forward + manual backward
+│   ├── optimizer.py           # AdamW com LR schedule
+│   ├── dataset.py             # batch sampler por época
 │   └── generate.py            # autoregressive sampling
 ├── checkpoints/               # created at runtime
 ├── train.py                   # entry point: download → tokenize → train loop
@@ -31,27 +31,28 @@ byte-to-byte-learning/
 
 ## 2. Hyperparameters (`config.py`)
 
-| Name | Value | Notes |
+| Name | Valor | Notas |
 |---|---|---|
-| `vocab_size` | 10 000 | target after BPE merges |
-| `num_merges` | 10 000 | BPE training iterations |
-| `context_length` | 256 | tokens per training window |
-| `d_model` | 256 | embedding dimension |
-| `n_heads` | 4 | attention heads (head_dim = 64) |
-| `n_layers` | 4 | transformer blocks |
-| `d_ff` | 1 024 | feed-forward hidden dim (4× d_model) |
-| `batch_size` | 64 | windows per step |
-| `learning_rate` | 3e-4 | AdamW lr |
-| `weight_decay` | 0.1 | AdamW (applied to weight matrices only) |
-| `beta1` | 0.9 | AdamW momentum |
-| `beta2` | 0.999 | AdamW velocity |
-| `eps` | 1e-8 | AdamW numerical stability |
-| `max_steps` | 20 000 | training steps |
-| `val_interval` | 500 | steps between validation prints |
-| `ckpt_interval` | 2 000 | steps between checkpoint saves |
-| `val_fraction` | 0.1 | fraction of corpus held out for validation |
+| `VOCAB_SIZE` | 10 000 | alvo após merges BPE |
+| `num_merges` | 10 000 | iterações de treino BPE |
+| `SEQUENCE_LENGTH` | 128 | tokens por janela de treino |
+| `EMBEDDING_DIM` | 200 | dimensão dos embeddings |
+| `N_HEADS` | 5 | cabeças de atenção (head_dim = 40) |
+| `N_BLOCKS` | 5 | blocos transformer |
+| `d_ff` | 800 | hidden dim FFN (4× EMBEDDING_DIM) |
+| `BATCH_SIZE` | 64 | janelas por batch |
+| `LEARNING_RATE_MAX` | 0.001 | lr inicial (cosine annealing) |
+| `LEARNING_RATE_MIN` | 0.0001 | lr mínimo (cosine annealing) |
+| `WEIGHT_DECAY` | 0.1 | AdamW (apenas matrizes de peso) |
+| `BETA1` | 0.9 | AdamW momentum |
+| `BETA2` | 0.95 | AdamW velocity |
+| `eps` | 1e-8 | estabilidade numérica AdamW |
+| `EPOCHS` | 75 | épocas de treino |
+| `VALIDATION_BATCHES` | 10 | batches usados para validação por época |
 
-Estimated total parameters: ~5.8M (see Section 4 for breakdown).
+> **Nota:** O treino usa épocas (`EPOCHS=75`) com cosine annealing de LR entre `LEARNING_RATE_MAX` e `LEARNING_RATE_MIN`. Usa `tqdm` para barra de progresso.
+
+Estimated total parameters: ~4.4M (see Section 3.2 for breakdown).
 
 ---
 
@@ -79,11 +80,11 @@ Estimated total parameters: ~5.8M (see Section 4 for breakdown).
 **Persistence:**
 - Save/load as JSON: `{"vocab": {id: str}, "merges": [[a, b], ...]}`.
 
-**Complexity:** Training is O(num_merges × corpus_length). For Shakespeare (~1MB) and 10k merges, expect ~1-2 min on CPU.
+**Complexity:** Training is O(num_merges × corpus_length). Para o corpus de Machado de Assis (~1MB) com 10k merges, esperar ~1-2 min na CPU.
 
 ---
 
-### 3.2 Transformer Model (`src/model.py`)
+### 3.2 Transformer Model (`src/gpt.py`)
 
 Each layer is a Python class with `forward(x)` → returns output and stores cache, and `backward(dout)` → returns `dx` and accumulates `dW`, `db`.
 
@@ -129,35 +130,40 @@ Transformer
 
 **Loss:** Cross-entropy over all positions. `loss = -log_softmax(logits)[targets]`, averaged over batch and time.
 
-**Parameter count breakdown (~5.8M total):**
+**Parameter count breakdown (~4.4M total):**
 
 | Component | Params |
 |---|---|
-| Token embedding (10k × 256) | 2 560 000 |
-| Positional embedding (256 × 256) | 65 536 |
-| Per block: 4 attention linears (4 × 256²) | 262 144 |
-| Per block: FFN linears (256×1024 + 1024×256) | 524 288 |
-| Per block: 2 LayerNorms (2 × 2 × 256) | 1 024 |
-| 4 blocks total | 3 149 824 |
-| Final LayerNorm | 512 |
+| Token embedding (10k × 200) | 2 000 000 |
+| Positional embedding (128 × 200) | 25 600 |
+| Per block: 4 attention linears (4 × 200²) | 160 000 |
+| Per block: FFN linears (200×800 + 800×200) | 320 000 |
+| Per block: 2 LayerNorms (2 × 2 × 200) | 800 |
+| 5 blocks total | 2 404 000 |
+| Final LayerNorm | 400 |
 | Output projection | 0 (tied) |
-| **Total** | **~5 775 872** |
+| **Total** | **~4 430 000** |
 
 ---
 
 ### 3.3 AdamW Optimizer (`src/optimizer.py`)
 
-Standard AdamW. On construction, initializes `m` and `v` dicts (zero arrays shaped like each parameter). On `step()`:
+AdamW com cosine annealing de learning rate. Inicializa `m` e `v` (zero arrays com shape de cada parâmetro). No `step(lr)`:
 
-1. Increment timestep `t`.
-2. For each `(param, grad)`:
-   - Apply weight decay to `param` (only if param is a weight matrix, not bias/LayerNorm).
-   - Update `m[param] = β1 * m + (1-β1) * grad`.
-   - Update `v[param] = β2 * v + (1-β2) * grad²`.
-   - Bias-correct: `m_hat = m / (1-β1^t)`, `v_hat = v / (1-β2^t)`.
-   - `param -= lr * m_hat / (√v_hat + ε)`.
+1. Incrementa timestep `t`.
+2. Para cada `(param, grad)`:
+   - Aplica weight decay em `param` (apenas matrizes de peso, não biases/LayerNorm).
+   - `m = β1*m + (1-β1)*grad`
+   - `v = β2*v + (1-β2)*grad²`
+   - Bias-correct: `m_hat = m / (1-β1^t)`, `v_hat = v / (1-β2^t)`
+   - `param -= lr * m_hat / (√v_hat + ε)`
 
-Params are identified by their Python `id()` to key the moment dicts.
+**Cosine annealing** (computado no `train.py`):
+```python
+lr = LR_MIN + 0.5*(LR_MAX - LR_MIN)*(1 + cos(π * step / total_steps))
+```
+
+Params identificados pelo `id()` Python para indexar os dicts de momento.
 
 ---
 
@@ -194,8 +200,8 @@ def generate(model, tokenizer, prompt, max_new_tokens=200, temperature=1.0):
 
 CLI usage:
 ```bash
-python generate.py --checkpoint checkpoints/step_20000.npz \
-                   --prompt "To be or not" --tokens 200 --temp 0.8
+python generate.py --checkpoint checkpoints/epoch_75.npz \
+                   --prompt "— Mas, senhora" --tokens 200 --temp 0.8
 ```
 
 ---
@@ -203,25 +209,25 @@ python generate.py --checkpoint checkpoints/step_20000.npz \
 ### 3.6 Training Entry Point (`train.py`)
 
 ```
-1. Load config from config.py
-2. Download shakespeare.txt if not present (from Project Gutenberg)
-3. If tokenizer.json exists: load. Else: train BPE, save.
-4. Tokenize full corpus. Split 90% train / 10% val.
-5. Initialize Transformer(config) with Xavier/He init.
-6. Initialize AdamW(model.parameters(), lr, wd, β1, β2, ε)
-7. Training loop (step = 0..max_steps):
-   a. get_batch(train_ids, ...) → x, targets
-   b. logits, loss = model.forward(x, targets)
-   c. model.backward()
-   d. optimizer.step(model.parameters_and_grads())
-   e. model.zero_grad()
-   f. If step % val_interval == 0:
-      - Compute val loss (no grad needed: forward only)
-      - Print: step, train_loss, val_loss, tokens/sec
-      - Sample 100 tokens from prompt "ROMEO:" and print
-   g. If step % ckpt_interval == 0:
-      - Save model weights + optimizer state to checkpoints/step_XXXXX.npz
-8. Print final sample.
+1. Carrega config de config.py
+2. Baixa corpus Machado de Assis se não existir (Project Gutenberg PT)
+3. Se tokenizer.json existir: carrega. Senão: treina BPE, salva.
+4. Tokeniza corpus completo. Separa 90% treino / 10% val.
+5. Inicializa GPT(config) com init Xavier/He.
+6. Inicializa AdamW(model.parameters(), wd, β1, β2, ε)
+7. Loop de treino (epoch = 0..EPOCHS, com tqdm):
+   a. Calcula lr via cosine annealing para o passo atual
+   b. get_batch(train_ids, ...) → x, targets
+   c. logits, loss = model.forward(x, targets)
+   d. model.backward()
+   e. optimizer.step(lr, model.parameters_and_grads())
+   f. model.zero_grad()
+   h. Ao fim de cada época:
+      - Calcula val loss em VALIDATION_BATCHES batches (só forward)
+      - Imprime: epoch, train_loss, val_loss, tokens/sec
+      - Amostra 100 tokens do prompt "— Mas, senhora" e imprime
+      - Salva checkpoint em checkpoints/epoch_XX.npz
+8. Imprime amostra final.
 ```
 
 ---
@@ -229,10 +235,10 @@ python generate.py --checkpoint checkpoints/step_20000.npz \
 ## 4. Data Flow Diagram
 
 ```
-shakespeare.txt (1MB)
+machado_assis.txt (1MB)
         │
         ▼
-  BPETokenizer.train()  ← 10k merges, ~1-2 min
+  Tokenizer.train()  ← 10k merges, ~1-2 min
         │
         ▼
   token_ids: np.array of shape (N,)  ← N ≈ 500k–1M tokens
@@ -253,7 +259,7 @@ shakespeare.txt (1MB)
         ▼
   AdamW.step() → updated params
         │
-        └──── repeat 20k steps (~11h CPU)
+        └──── repeat 75 epochs
 ```
 
 ---
